@@ -1,169 +1,110 @@
 import numpy as np
-from src.utils import sigmoid, sigmoid_derivative, softmax
+from src.utils import softmax, sigmoid_derivative
 
-class RLNeuralNetwork:
-    def __init__(self, input_size, hidden_size, output_size, memory_capacity=1000):
-        # Network architecture
-        self.input_size = input_size
+class ReasoningEngine:
+    def __init__(self, vocab_size, embedding_size=128, hidden_size=256):
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
         self.hidden_size = hidden_size
-        self.output_size = output_size
-        
-        # Initialize weights with small random values
-        self.weights1 = np.random.randn(input_size, hidden_size) * 0.01
-        self.weights2 = np.random.randn(hidden_size, output_size) * 0.01
-        self.bias1 = np.zeros((1, hidden_size))
-        self.bias2 = np.zeros((1, output_size))
-        
-        # Reinforcement learning parameters
-        self.gamma = 0.95  # Discount factor
-        self.epsilon = 0.3  # Exploration rate
-        self.epsilon_decay = 0.995  # Decay rate for exploration
-        self.epsilon_min = 0.01  # Minimum exploration rate
-        self.learning_rate = 0.01
-        
-        # Experience memory
-        self.memory_capacity = memory_capacity
-        self.memory = []
-        self.memory_counter = 0
-        self.batch_size = 32  # Size of minibatch for training
-        
-        # Training threshold
-        self.train_threshold = 100  # Minimum experiences before training
-        self.retrain_frequency = 50  # How often to retrain (in steps)
-        self.step_counter = 0
+        self.intent_weights = np.random.randn(embedding_size, hidden_size) * 0.01
+        self.intent_bias = np.zeros((1, hidden_size))
+        self.output_weights = np.random.randn(hidden_size, 3) * 0.01  # 3 intents
+        self.output_bias = np.zeros((1, 3))
     
-    def forward(self, X):
-        """Forward pass through the network"""
-        # Ensure X is a 2D array
-        if X.ndim == 1:
-            X = X.reshape(1, -1)
+    def forward(self, embeddings):
+        hidden = np.tanh(np.dot(embeddings, self.intent_weights) + self.intent_bias)
+        logits = np.dot(hidden, self.output_weights) + self.output_bias
+        probs = softmax(logits)
+        return probs
+    
+    def train(self, X, y, epochs=10, lr=0.001, batch_size=32):
+        for epoch in range(epochs):
+            total_loss = 0
+            for i in range(0, len(X), batch_size):
+                batch_X = X[i:i+batch_size]
+                batch_y = y[i:i+batch_size]
+                
+                probs = self.forward(batch_X)
+                loss = -np.mean(np.sum(batch_y * np.log(probs + 1e-10), axis=1))
+                total_loss += loss
+                
+                dloss = (probs - batch_y) / len(batch_X)
+                d_hidden = np.dot(dloss, self.output_weights.T)
+                d_tanh = d_hidden * (1 - np.tanh(np.dot(batch_X, self.intent_weights) + self.intent_bias)**2)
+                
+                self.output_weights -= lr * np.dot(np.tanh(np.dot(batch_X, self.intent_weights) + self.intent_bias).T, dloss)
+                self.output_bias -= lr * np.sum(dloss, axis=0, keepdims=True)
+                self.intent_weights -= lr * np.dot(batch_X.T, d_tanh)
+                self.intent_bias -= lr * np.sum(d_tanh, axis=0, keepdims=True)
             
-        self.z1 = np.dot(X, self.weights1) + self.bias1
-        self.a1 = sigmoid(self.z1)
-        self.z2 = np.dot(self.a1, self.weights2) + self.bias2
-        self.a2 = sigmoid(self.z2)
-        return self.a2
+            print(f"Reasoning Epoch {epoch+1}/{epochs}, Loss: {total_loss / (len(X) // batch_size):.4f}")
+
+class Generator:
+    def __init__(self, vocab_size, embedding_size=128, hidden_size=256, num_layers=2, max_len=50):
+        self.vocab_size = vocab_size
+        self.embedding_size = embedding_size
+        self.hidden_size = hidden_size
+        self.num_layers = num_layers
+        self.max_len = max_len
+        
+        self.embeddings = np.random.randn(vocab_size, embedding_size) * 0.01
+        self.Wq = [np.random.randn(hidden_size, hidden_size) * 0.01 for _ in range(num_layers)]
+        self.Wk = [np.random.randn(hidden_size, hidden_size) * 0.01 for _ in range(num_layers)]
+        self.Wv = [np.random.randn(hidden_size, hidden_size) * 0.01 for _ in range(num_layers)]
+        self.Wo = np.random.randn(hidden_size, vocab_size) * 0.01
     
-    def choose_action(self, state):
-        """Choose an action using epsilon-greedy policy"""
-        # Explore: random action
-        if np.random.uniform() < self.epsilon:
-            return np.random.randint(0, self.output_size)
+    def forward(self, input_ids, hidden=None):
+        if hidden is None:
+            hidden = [np.zeros((len(input_ids), self.hidden_size)) for _ in range(self.num_layers)]
         
-        # Exploit: best action according to model
-        actions_value = self.forward(state)
-        return np.argmax(actions_value)
-    
-    def store_experience(self, state, action, reward, next_state, done):
-        """Store an experience in memory"""
-        experience = (state, action, reward, next_state, done)
-        
-        if len(self.memory) < self.memory_capacity:
-            self.memory.append(experience)
-        else:
-            # Replace old memory with new one
-            index = self.memory_counter % self.memory_capacity
-            self.memory[index] = experience
-        
-        self.memory_counter += 1
-        self.step_counter += 1
-        
-        # Check if we should retrain the model
-        if (len(self.memory) >= self.train_threshold and 
-            self.step_counter % self.retrain_frequency == 0):
-            self.replay()
+        embeddings = self.embeddings[input_ids]
+        for layer in range(self.num_layers):
+            Q = np.dot(hidden[layer], self.Wq[layer])
+            K = np.dot(embeddings, self.Wk[layer])
+            V = np.dot(embeddings, self.Wv[layer])
             
-            # Decay exploration rate
-            if self.epsilon > self.epsilon_min:
-                self.epsilon *= self.epsilon_decay
+            attention_scores = np.dot(Q, K.T) / np.sqrt(self.hidden_size)
+            attention_weights = softmax(attention_scores)
+            attention_output = np.dot(attention_weights, V)
+            hidden[layer] = hidden[layer] + attention_output
+        
+        logits = np.dot(hidden[-1], self.Wo)
+        return logits, hidden
     
-    def replay(self, batch_size=None):
-        """Train the model on a batch of experiences"""
-        if batch_size is None:
-            batch_size = min(self.batch_size, len(self.memory))
+    def generate(self, input_ids, max_new_tokens=50):
+        hidden = None
+        output_ids = list(input_ids)
         
-        # Sample a minibatch
-        mini_batch = np.random.choice(len(self.memory), batch_size, replace=False)
-        states = np.zeros((batch_size, self.input_size))
-        next_states = np.zeros((batch_size, self.input_size))
-        actions, rewards, dones = [], [], []
+        for _ in range(max_new_tokens):
+            logits, hidden = self.forward(np.array([output_ids[-self.max_len:]]), hidden)
+            probs = softmax(logits[-1])
+            next_id = np.argmax(probs)
+            if next_id == 0:  # <PAD>
+                break
+            output_ids.append(next_id)
         
-        # Extract data from experiences
-        for i, idx in enumerate(mini_batch):
-            states[i] = self.memory[idx][0]
-            actions.append(self.memory[idx][1])
-            rewards.append(self.memory[idx][2])
-            next_states[i] = self.memory[idx][3]
-            dones.append(self.memory[idx][4])
-        
-        # Current Q values
-        current_q = self.forward(states)
-        
-        # Next Q values
-        next_q = self.forward(next_states)
-        max_next_q = np.max(next_q, axis=1)
-        
-        # Update Q values for the actions taken
-        for i in range(batch_size):
-            target = rewards[i]
-            if not dones[i]:
-                target += self.gamma * max_next_q[i]
+        return output_ids
+    
+    def train(self, X, y, epochs=10, lr=0.001):
+        for epoch in range(epochs):
+            total_loss = 0
+            for i in range(len(X)):
+                input_ids = X[i]
+                target_ids = y[i]
+                
+                hidden = None
+                loss = 0
+                for t in range(len(target_ids)):
+                    logits, hidden = self.forward(np.array([input_ids[-self.max_len:]]), hidden)
+                    probs = softmax(logits[-1])
+                    loss += -np.log(probs[target_ids[t]] + 1e-10)
+                    input_ids.append(target_ids[t])
+                
+                total_loss += loss / len(target_ids)
+                self._backprop(X[i], target_ids, lr)
             
-            # Update only the Q value for the action taken
-            current_q[i, actions[i]] = target
-        
-        # Train the network
-        self._train_on_batch(states, current_q)
-        
-        print(f"Replayed {batch_size} experiences, memory size: {len(self.memory)}")
-        
-        # If memory is full, consider trimming old data
-        if len(self.memory) >= self.memory_capacity:
-            self._prune_memory()
+            print(f"Generator Epoch {epoch+1}/{epochs}, Loss: {total_loss / len(X):.4f}")
     
-    def _train_on_batch(self, X, y):
-        """Train the network on a batch of data"""
-        # Forward pass
-        self.forward(X)
-        
-        # Backward pass
-        error = y - self.a2
-        delta2 = error * sigmoid_derivative(self.a2)
-        error_hidden = np.dot(delta2, self.weights2.T)
-        delta1 = error_hidden * sigmoid_derivative(self.a1)
-        
-        # Update weights
-        self.weights2 += self.learning_rate * np.dot(self.a1.T, delta2)
-        self.bias2 += self.learning_rate * np.sum(delta2, axis=0, keepdims=True)
-        self.weights1 += self.learning_rate * np.dot(X.T, delta1)
-        self.bias1 += self.learning_rate * np.sum(delta1, axis=0, keepdims=True)
-    
-    def _prune_memory(self):
-        """Remove older experiences to make room for new ones"""
-        # Keep the most recent 75% of experiences
-        memory_size = len(self.memory)
-        keep_size = int(memory_size * 0.75)
-        self.memory = self.memory[memory_size - keep_size:]
-        print(f"Pruned memory from {memory_size} to {keep_size} experiences")
-    
-    def save_model(self, filename):
-        """Save model weights and parameters"""
-        model_data = {
-            'weights1': self.weights1,
-            'weights2': self.weights2,
-            'bias1': self.bias1,
-            'bias2': self.bias2,
-            'epsilon': self.epsilon
-        }
-        np.save(filename, model_data)
-        print(f"Model saved to {filename}")
-    
-    def load_model(self, filename):
-        """Load model weights and parameters"""
-        model_data = np.load(filename, allow_pickle=True).item()
-        self.weights1 = model_data['weights1']
-        self.weights2 = model_data['weights2']
-        self.bias1 = model_data['bias1']
-        self.bias2 = model_data['bias2']
-        self.epsilon = model_data['epsilon']
-        print(f"Model loaded from {filename}")
+    def _backprop(self, input_ids, target_ids, lr):
+        # Placeholder—full backprop is complex, focusing on forward for now
+        pass  # TODO: Implement if generation needs refinement
