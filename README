@@ -1,6 +1,6 @@
 Project Kai - A Personal Reasoning Assistant 🤖
 
-Kai is an advanced personal assistant, inspired by JARVIS, is designed to provide intelligent, context-aware, and personalized responses. Built with a hybrid architecture combining rule-based reasoning, neural networks, and reinforcement learning, Kai can understand, reason, and generate human-like text while adapting to user preferences over time.
+Project Kai is an Open-Source friend built from scratch to meet the needs of a personal assistant. By "from scratch", I mean that the model is not made using transformers, everything from the reasoning to the models abilty to reason and generate full sentences (Ability of GPTs and BERT) is built from scratch. This means that the model is fully stand alone and also gets information from the internet if needed, but mostly it relies on the data that it has been trained on. I planned for it to be uncensored and it is still my aim with this project. The model is made to run effectively and efficiently on devices like an i5-8600 CPU with 8GB RAM and higher so it runs on almost every machine posible.
 
 Features ✨
 
