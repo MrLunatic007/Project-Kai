@@ -1,6 +1,8 @@
 import numpy as np
 import pickle
 import os
+import requests
+from bs4 import BeautifulSoup
 from src.preprocess import Preprocessor
 from src.neural_network import ReasoningEngine, Generator
 from src.memory_manager import MemoryManager
@@ -11,7 +13,7 @@ class PersonalAssistant:
         self.model_path = model_path
         self.generator = None
         self.reasoner = None
-        self.memory_manager = MemoryManager(max_memories=2000)  # Added MemoryManager
+        self.memory_manager = MemoryManager(max_memories=2000)
         self.response_types = ["tell_story", "ask_question", "give_info"]
         self.max_context_length = 3
         self.current_conversation = []
@@ -50,7 +52,7 @@ class PersonalAssistant:
         self.generator = Generator(self.preprocessor.vocab_size)
         self.generator.train(X_ids, y_ids)
         
-        # Initial memory from dataset (optional)
+        # Seed memory
         for x, y in zip(X_text, y_text):
             self.memory_manager.add_memory(x, y)
         
@@ -68,37 +70,58 @@ class PersonalAssistant:
         input_ids = self.preprocessor.text_to_ids(context_text)
         input_embed = np.mean(self.preprocessor.word_embeddings[input_ids], axis=0).reshape(1, -1)
         
-        # Check memory for relevant past responses
+        # Check user memory first
         memories = self.memory_manager.get_relevant_memories(user_input)
-        if memories:
-            # Use most relevant memory if it’s a strong match
-            if memories[0]["relevance"] > 0.8:
-                response = memories[0]["response"]
-                context.append({"role": "assistant", "content": response})
-                self.current_conversation.append({"role": "assistant", "content": response})
-                return response, context
+        if memories and memories[0]["relevance"] > 0.8:
+            response = memories[0]["response"]
+        else:
+            # Check web data
+            web_entries = self.memory_manager.get_web_data(user_input)
+            if web_entries and web_entries[0]["relevance"] > 0.7:
+                response = f"From the web: {web_entries[0]['content']}"
+            else:
+                # Scrape the web if no good match
+                web_content = self.scrape_web(user_input)
+                if web_content:
+                    response = f"Found online: {web_content}"
+                    self.memory_manager.add_web_data(user_input, web_content, "https://www.google.com/search?q=" + user_input.replace(" ", "+"))
+                else:
+                    # Generate if all else fails
+                    intent_probs = self.reasoner.forward(input_embed)
+                    intent_idx = np.argmax(intent_probs)
+                    response_type = self.response_types[intent_idx]
+                    prompt_ids = self.preprocessor.text_to_ids(f"[{response_type}] {user_input}")
+                    output_ids = self.generator.generate(prompt_ids)
+                    response = self.preprocessor.ids_to_text(output_ids[len(prompt_ids):])
         
-        # Intent via Reasoner
-        intent_probs = self.reasoner.forward(input_embed)
-        intent_idx = np.argmax(intent_probs)
-        response_type = self.response_types[intent_idx]
-        
-        # Generate Response
-        prompt_ids = self.preprocessor.text_to_ids(f"[{response_type}] {user_input}")
-        output_ids = self.generator.generate(prompt_ids)
-        response = self.preprocessor.ids_to_text(output_ids[len(prompt_ids):])
-        
-        # Store in memory
+        # Store user-Kai interaction in memory
         self.memory_manager.add_memory(user_input, response)
         
         context.append({"role": "assistant", "content": response})
         self.current_conversation.append({"role": "assistant", "content": response})
         
-        # Retrain if needed
         if self.memory_manager.check_retrain_needed():
             self._retrain_from_memory()
         
         return response, context
+    
+    def scrape_web(self, query):
+        """Simple web scraper using Google search"""
+        try:
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+            url = f"https://www.google.com/search?q={query.replace(' ', '+')}"
+            response = requests.get(url, headers=headers, timeout=5)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Grab first snippet or paragraph-like content
+            for div in soup.find_all('div', class_='BNeawe s3v9rd AP7Wnd'):
+                text = div.get_text()
+                if len(text) > 50:  # Decent length
+                    return text[:500]  # Cap at 500 chars
+            return None
+        except Exception as e:
+            print(f"Web scrape failed: {e}")
+            return None
     
     def _retrain_from_memory(self):
         training_data = self.memory_manager.get_training_data()
@@ -111,8 +134,7 @@ class PersonalAssistant:
         X_ids = [self.preprocessor.text_to_ids(x) for x in X_text]
         y_ids = [self.preprocessor.text_to_ids(y) for y in y_text]
         
-        # Retrain Generator with memory data
-        self.generator.train(X_ids, y_ids, epochs=5)  # Fewer epochs for retraining
+        self.generator.train(X_ids, y_ids, epochs=5)
         self.memory_manager.clear_short_term_memory()
         self.save_model()
     
@@ -125,7 +147,7 @@ class PersonalAssistant:
                 'response_types': self.response_types,
                 'dataset_samples': self.dataset_samples
             }, f)
-        self.memory_manager.save_memories()  # Save memories too
+        self.memory_manager.save_memories()
     
     def load_model(self):
         with open(self.model_path, 'rb') as f:
@@ -135,4 +157,3 @@ class PersonalAssistant:
         self.reasoner = data['reasoner']
         self.response_types = data['response_types']
         self.dataset_samples = data['dataset_samples']
-        # MemoryManager loads its own state in __init__
